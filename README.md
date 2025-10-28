@@ -1,4 +1,4 @@
-# AWS Data Analysis Pipeline (S3, Glue, Athena)
+# AWS Data Analysis Pipeline (S3, Glue, Athena, IAM, CloudWatch)
 
 This project demonstrates a serverless data analysis pipeline built using core AWS services. The objective is to ingest a raw CSV dataset (`Amazon Sale Report.csv`), use AWS Glue to catalog the data, and then use Amazon Athena to run complex analytical SQL queries on the data directly from S3.
 
@@ -17,14 +17,12 @@ The entire workflow is **serverless**, meaning we don't need to manage any under
 ## AWS Services Explained
 
 ### 1. AWS S3 (Simple Storage Service)
-
 * **What it is:** S3 is a highly durable and scalable object storage service. You can think of it as a limitless hard drive in the cloud, designed to store any amount of data.
 * **Role in this Project:**
     * **Data Lake:** S3 serves as our data lake, holding the raw `Amazon Sale Report.csv` file.
     * **Query Results:** Athena is configured to save all query results as new CSV files in a separate S3 bucket.
 
-*(Your S3 bucket configuration)*
-![My S3 Buckets](AWS_S3.png)
+<img width="780" height="620" alt="AWS_S3" src="https://github.com/user-attachments/assets/0e0dd818-65b5-430d-94cb-35aae2ab80bb" />
 
 ### 2. AWS IAM (Identity and Access Management)
 
@@ -33,8 +31,7 @@ The entire workflow is **serverless**, meaning we don't need to manage any under
     * We created an **IAM Role** (a set of permissions) that our Glue service could "assume."
     * This role was granted permissions (policies) to allow it to read data from our S3 bucket (`AmazonS3FullAccess`) and to perform Glue operations (`AWSGlueConsoleFullAccess`). Without this role, the Glue Crawler would be denied access to your S3 data.
 
-*(Your IAM role configuration)*
-![My IAM Role](AWS_IAM.png)
+<img width="780" height="620" alt="AWS_IAM" src="https://github.com/user-attachments/assets/b6e1080e-eea6-4b85-98a6-3adf9bb4837d" />
 
 ### 3. AWS Glue
 
@@ -43,8 +40,7 @@ The entire workflow is **serverless**, meaning we don't need to manage any under
     * **Glue Crawler:** We used the crawler to scan our S3 bucket. It automatically analyzed the `Amazon Sale Report.csv` file, identified all the columns (like `Order ID`, `Date`, `Status`, `Amount`), and inferred their data types (string, number, etc.).
     * **Glue Data Catalog:** The crawler then registered this schema as a table (e.t., `raw`) inside a database (e.g., `handson_output_db`). This catalog acts as a central "metastore" or "phone book" that tells other services (like Athena) where your data lives and what it looks like.
 
-*(Your Glue database configuration)*
-![My Glue Database](AWS_Glue.png)
+<img width="780" height="620" alt="AWS_Glue" src="https://github.com/user-attachments/assets/6d8203f9-636d-47cf-8e3b-cfcfb343b5c0" />
 
 ### 4. Amazon Athena
 
@@ -61,8 +57,7 @@ The entire workflow is **serverless**, meaning we don't need to manage any under
     * When our Glue Crawler ran, it published its logs to CloudWatch.
     * We used the CloudWatch logs to verify that the crawler ran successfully and to troubleshoot any potential errors (e.g., permission issues).
 
-*(You will need to add your own screenshot of the CloudWatch logs here, as instructed in the PDF.)*
-`[Add your CloudWatch screenshot here]`
+<img width="780" height="620" alt="AWSCloudWatch" src="https://github.com/user-attachments/assets/be4d4a9d-78cc-408e-8964-66e23a91eccd" />
 
 ---
 
@@ -75,28 +70,150 @@ Here are the adapted SQL queries for the project, based on the columns available
 ### 1. Cumulative Sales Over Time (for 2022)
 
 ```sql
--- This query calculates the running total of sales for each day of 2022.
--- It assumes the date format is 'MM-DD-YY'
-WITH DailySales AS (
+SELECT
+    "date",
+    SUM(CAST(amount AS DOUBLE)) AS daily_sales,
+    SUM(SUM(CAST(amount AS DOUBLE))) OVER (ORDER BY "date" ASC) AS cumulative_sales
+FROM
+   "AwsDataCatalog"."handson_output_db"."raw"
+WHERE
+    status IN ('Shipped', 'Shipped - Delivered to Buyer')
+    AND substr("date", 7, 2) = '22'  -- Assuming 2022 (based on '04-30-22' format)
+GROUP BY
+    "date"
+ORDER BY
+    "date" ASC
+LIMIT 10;
+```
+
+## Output Screenshot
+
+<img width="780" height="620" alt="Output1" src="https://github.com/user-attachments/assets/542c5107-8072-4021-83c6-9f28c514d824" />
+
+### 2. Geographic "Hotspot" Analysis (Cancelled Orders)
+
+```sql
+SELECT
+    "ship-state",
+    SUM(CAST("Amount" AS DOUBLE)) AS total_cancelled_amount
+FROM
+    "AwsDataCatalog"."handson_output_db"."raw"
+WHERE
+    "Status" = 'Cancelled'
+GROUP BY
+    "ship-state"
+ORDER BY
+    total_cancelled_amount DESC
+LIMIT 10;
+```
+
+## Output Screenshot
+
+<img width="780" height="620" alt="Output2" src="https://github.com/user-attachments/assets/2d4d0596-7cac-432c-ae07-11e16353fa60" />
+
+### 3. Impact of Promotions on Sales by Category
+
+```sql
+SELECT
+    "Category",
+    CASE 
+        WHEN "promotion-ids" IS NULL THEN 'No Promotion'
+        ELSE 'With Promotion' 
+    END AS promotion_applied,
+    COUNT(*) AS total_orders,
+    SUM(CAST("Amount" AS DOUBLE)) AS total_sales_amount,
+    AVG(CAST("Amount" AS DOUBLE)) AS average_sale_amount
+FROM
+    "AwsDataCatalog"."handson_output_db"."raw"
+WHERE
+    "Status" IN ('Shipped', 'Shipped - Delivered to Buyer')
+GROUP BY
+    "Category",
+    CASE 
+        WHEN "promotion-ids" IS NULL THEN 'No Promotion'
+        ELSE 'With Promotion' 
+    END
+ORDER BY
+    "Category" ASC,
+    total_sales_amount DESC
+LIMIT 10;
+```
+
+## Output Screenshot
+
+<img width="780" height="620" alt="Output3" src="https://github.com/user-attachments/assets/3f02d827-fa41-4c13-ab69-c24e9dc9dc7b" />
+
+### 4. Ranking Products by Sales Within Each Category
+
+```sql
+WITH ranked_products AS (
     SELECT
-        date_parse("Date", '%m-%d-%y') AS sale_date,
-        SUM(CAST("Amount" AS DOUBLE)) AS daily_sales
+        "Category" AS category,
+        "SKU" AS sku,
+        SUM("Amount") AS total_revenue,
+        RANK() OVER (
+            PARTITION BY "Category"
+            ORDER BY SUM("Amount") DESC
+        ) AS rank_in_category
+    FROM handson_output_db.raw
+    GROUP BY "Category", "SKU"
+)
+SELECT
+    category,
+    sku,
+    total_revenue,
+    rank_in_category
+FROM ranked_products
+WHERE rank_in_category <= 3
+LIMIT 10;
+```
+## Output Screenshot
+
+<img width="780" height="620" alt="Output4" src="https://github.com/user-attachments/assets/3e836487-0b0c-413c-8b4d-f839758111e3" />
+
+### 5. Monthly Sales and Quantity Growth Analysis
+
+```sql
+WITH MonthlyMetrics AS (
+    SELECT
+        date_trunc('month', date_parse("Date", '%m-%d-%y')) AS sales_month,
+        SUM(CAST("Amount" AS DOUBLE)) AS total_sales,
+        SUM(CAST("Qty" AS BIGINT)) AS total_quantity
     FROM
         "AwsDataCatalog"."handson_output_db"."raw"
     WHERE
         "Status" IN ('Shipped', 'Shipped - Delivered to Buyer')
-        AND substr("Date", 7, 2) = '22'
     GROUP BY
-        date_parse("Date", '%m-%d-%y')
+        date_trunc('month', date_parse("Date", '%m-%d-%y'))
 )
+
 SELECT
-    sale_date,
-    daily_sales,
-    SUM(daily_sales) OVER (
-        ORDER BY sale_date ASC
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS cumulative_sales
+    sales_month,
+    total_sales,
+    total_quantity,
+
+    LAG(total_sales, 1) OVER (ORDER BY sales_month ASC) AS previous_month_sales,
+    LAG(total_quantity, 1) OVER (ORDER BY sales_month ASC) AS previous_month_quantity,
+    CASE
+        WHEN LAG(total_sales, 1) OVER (ORDER BY sales_month ASC) > 0 
+        THEN (total_sales - LAG(total_sales, 1) OVER (ORDER BY sales_month ASC))
+             / LAG(total_sales, 1) OVER (ORDER BY sales_month ASC)
+        ELSE NULL
+    END AS sales_mom_growth_rate,
+    
+    CASE
+        WHEN LAG(total_quantity, 1) OVER (ORDER BY sales_month ASC) > 0
+        THEN (CAST(total_quantity AS DOUBLE) - LAG(total_quantity, 1) OVER (ORDER BY sales_month ASC))
+             / LAG(total_quantity, 1) OVER (ORDER BY sales_month ASC)
+        ELSE NULL
+    END AS quantity_mom_growth_rate
+    
 FROM
-    DailySales
+    MonthlyMetrics
 ORDER BY
-    sale_date ASC;
+    sales_month ASC
+LIMIT 10;
+```
+## Output Screenshot
+
+<img width="780" height="620" alt="Output5" src="https://github.com/user-attachments/assets/0079a7e4-76fc-439d-8e78-23f4b0b124ec" />
